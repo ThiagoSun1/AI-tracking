@@ -68,3 +68,7 @@ cd ~/AI-tracking
 python3 yolo.py
 
 ```
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
