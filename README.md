@@ -54,8 +54,8 @@ source venv/bin/activate
 sudo apt update
 sudo apt install python3-pip
 
-pip install opencv-python numpy ultralytics adafruit-circuitpython-pca9685 adafruit-circuitpython-motor
-
+# install necessary dependencies
+pip install -r requirements.txt --force-reinstall
 
 #check if pca9685 is connected correctly; it should show a 40 in the 40 row and the 0 column
 sudo i2cdetect -y -r 1
