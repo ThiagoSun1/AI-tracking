@@ -36,6 +36,11 @@ This project captures video and automatically follows the **soccer ball or whate
 Before installing anything, make sure you're in a virtual enviroment:
 
 ```bash
+
+# clone the repository
+git clone https://github.com/ThiagoSun1/AI-tracking
+cd ~/AI-tracking
+
 # install package to create virtual enviroment
 pip install virtualenv
 
@@ -59,10 +64,6 @@ pip install -r requirements.txt --force-reinstall
 
 #check if pca9685 is connected correctly; it should show a 40 in the 40 row and the 0 column
 sudo i2cdetect -y -r 1
-
-# clone the repository
-git clone https://github.com/ThiagoSun1/AI-tracking
-cd ~/AI-tracking
 
 # run the tracker
 python3 yolo.py
