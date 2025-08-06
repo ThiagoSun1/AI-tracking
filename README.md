@@ -22,7 +22,7 @@ This project captures video and automatically follows the **soccer ball or whate
 
 ## 📦 Hardware Requirements
 
-- Jetson Nano Jetpack 4.6.4
+- Raspberry Pi 5
 - Logitech C270 webcam
 - 2× MG995 servo motors
 - PCA9685 16-channel PWM servo driver
