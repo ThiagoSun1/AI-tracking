@@ -1,6 +1,6 @@
 # AI Soccer Ball Tracker
 
-A Jetson Nano-based object detection system that **tracks a soccer ball using AI in real time** and records the game or training session using a Logitech C270 webcam and servo-controlled panning Built entirely in Python, it uses two MG995 servo motors and a PCA9685 controller to physically follow the ball across the field.
+A Pi 5-based object detection system that **tracks a soccer ball using AI in real time** and records the game or training session using a Logitech C270 webcam and servo-controlled panning Built entirely in Python, it uses two MG995 servo motors and a PCA9685 controller to physically follow the ball across the field.
 
 ---
 
@@ -15,7 +15,7 @@ This project captures video and automatically follows the **soccer ball or whate
 - 🎯 Tracks a color of your choice in real time using OpenCV
 - 📷 Records the a soccer match or training session with the Logitech C270 webcam
 - 🔄 Dual MG995 servo motors (pan & tilt) controlled by PCA9685
-- ⚙️ Runs entirely on a Jetson Nano
+- ⚙️ Runs entirely on a Raspberry Pi 5
 - 🐍 Written in pure Python with no external apps or software needed
 
 ---
@@ -52,7 +52,7 @@ source venv/bin/activate
 
 ```
 
-- Python 3.8 (pre-installed on Jetson Nano)
+- Python 3.8 (pre-installed on Raspberry Pi 5)
 - The following Python libraries:
 
 ```bash
@@ -69,7 +69,3 @@ sudo i2cdetect -y -r 1
 python3 yolo.py
 
 ```
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
