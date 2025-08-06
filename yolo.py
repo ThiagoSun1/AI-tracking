@@ -1,547 +1,363 @@
-#!/usr/bin/env python3
-"""
-Soccer Ball Tracker with Servo Control and Clean Video Recording
-Tracks soccer ball and uses servos to physically follow it while recording clean video
-"""
-
+#!/usr/bin/python3
 import cv2
 import numpy as np
-from ultralytics import YOLO
 import time
-import os
-from datetime import datetime
-try:
-    import board
-    import busio
-    from adafruit_pca9685 import PCA9685
-    from adafruit_motor import servo
-    SERVO_AVAILABLE = True
-except ImportError:
-    print("Warning: Adafruit libraries not available. Servo control disabled.")
-    print("Install with: pip install adafruit-circuitpython-pca9685 adafruit-circuitpython-motor")
-    SERVO_AVAILABLE = False
+from ultralytics import YOLO
+from adafruit_servokit import ServoKit
 
-class ServoController:
-    def __init__(self, pan_channel=0, tilt_channel=1, i2c_address=0x40):
-        """
-        Initialize Adafruit servo controller
-        
-        Args:
-            pan_channel (int): PCA9685 channel for pan servo (0-15)
-            tilt_channel (int): PCA9685 channel for tilt servo (0-15)
-            i2c_address (hex): I2C address of PCA9685 board (default 0x40)
-        """
-        if not SERVO_AVAILABLE:
-            print("Servo control not available - running in simulation mode")
-            self.enabled = False
-            return
-            
-        self.pan_channel = pan_channel
-        self.tilt_channel = tilt_channel
-        self.enabled = True
-        
-        try:
-            # Initialize I2C and PCA9685
-            self.i2c = busio.I2C(board.SCL, board.SDA)
-            self.pca = PCA9685(self.i2c, address=i2c_address)
-            self.pca.frequency = 50  # 50Hz for servos
-            
-            # Create servo objects
-            self.pan_servo = servo.Servo(self.pca.channels[pan_channel])
-            self.tilt_servo = servo.Servo(self.pca.channels[tilt_channel])
-            
-            # Set servo ranges (adjust these based on your specific servos)
-            self.pan_servo.set_pulse_width_range(min_pulse=500, max_pulse=2500)
-            self.tilt_servo.set_pulse_width_range(min_pulse=500, max_pulse=2500)
-            
-            print(f"Adafruit PCA9685 servo controller initialized")
-            print(f"Pan servo: Channel {pan_channel}, Tilt servo: Channel {tilt_channel}")
-            
-        except Exception as e:
-            print(f"Error initializing Adafruit servo controller: {e}")
-            self.enabled = False
-            return
-        
-        # Servo limits (in degrees)
-        self.pan_min_deg = -90
-        self.pan_max_deg = 90
-        self.tilt_min_deg = -45
-        self.tilt_max_deg = 45
-        
-        # Current positions
-        self.current_pan = 0
-        self.current_tilt = 0
-        
-        # Movement constraints
-        self.max_speed = 5.0  # degrees per frame
-        self.dead_zone = 20   # pixels - don't move if ball is within this range of center
-        
-        # Move to center position
-        self.move_to_position(0, 0)
-        print(f"Servos initialized and centered")
+class PIDController:
+    def __init__(self, kp=1.0, ki=0.0, kd=0.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.prev_error = 0
+        self.integral = 0
+        self.last_time = time.time()
     
-    def move_to_position(self, pan_degrees, tilt_degrees):
-        """Move servos to specific position using Adafruit library"""
-        if not self.enabled:
-            return
-            
-        # Clamp to limits
-        pan_degrees = max(self.pan_min_deg, min(self.pan_max_deg, pan_degrees))
-        tilt_degrees = max(self.tilt_min_deg, min(self.tilt_max_deg, tilt_degrees))
+    def update(self, error):
+        current_time = time.time()
+        dt = current_time - self.last_time
         
-        self.current_pan = pan_degrees
-        self.current_tilt = tilt_degrees
+        if dt <= 0:
+            dt = 0.01
         
-        try:
-            # Move servos using Adafruit library (handles angle conversion automatically)
-            self.pan_servo.angle = pan_degrees + 90   # Convert to 0-180 range
-            self.tilt_servo.angle = tilt_degrees + 90  # Convert to 0-180 range
-        except Exception as e:
-            print(f"Error moving servos: {e}")
-            self.enabled = False
-    
-    def track_target(self, target_x, target_y, frame_width, frame_height):
-        """
-        Calculate servo movements to track target
+        # PID calculation
+        p_term = self.kp * error
+        self.integral += error * dt
+        i_term = self.ki * self.integral
+        derivative = (error - self.prev_error) / dt
+        d_term = self.kd * derivative
         
-        Args:
-            target_x, target_y: Target position in pixels
-            frame_width, frame_height: Frame dimensions
-        """
-        if not self.enabled:
-            return
-            
-        # Calculate center offset
-        center_x = frame_width // 2
-        center_y = frame_height // 2
+        output = p_term + i_term + d_term
         
-        error_x = target_x - center_x
-        error_y = target_y - center_y
+        # Update for next iteration
+        self.prev_error = error
+        self.last_time = current_time
         
-        # Check if within dead zone
-        if abs(error_x) < self.dead_zone and abs(error_y) < self.dead_zone:
-            return
-        
-        # Calculate required movement (proportional control)
-        # Scale pixel error to degree movement
-        pan_movement = -(error_x / frame_width) * 45  # Negative for correct direction
-        tilt_movement = (error_y / frame_height) * 30
-        
-        # Limit movement speed
-        pan_movement = max(-self.max_speed, min(self.max_speed, pan_movement))
-        tilt_movement = max(-self.max_speed, min(self.max_speed, tilt_movement))
-        
-        # Calculate new positions
-        new_pan = self.current_pan + pan_movement
-        new_tilt = self.current_tilt + tilt_movement
-        
-        # Move servos
-        self.move_to_position(new_pan, new_tilt)
-    
-    def center_servos(self):
-        """Move servos to center position"""
-        self.move_to_position(0, 0)
-    
-    def cleanup(self):
-        """Clean up Adafruit servo resources"""
-        if not self.enabled:
-            return
-            
-        try:
-            # Center servos before shutdown
-            self.center_servos()
-            time.sleep(0.5)
-            
-            # Deinitialize PCA9685
-            self.pca.deinit()
-            print("Adafruit servo controller cleaned up")
-        except Exception as e:
-            print(f"Error during servo cleanup: {e}")
+        return max(-3, min(3, output))  # Limit output for smooth movement
 
-class SoccerBallTrackerWithServos:
-    def __init__(self, model_path, camera_index=0, output_dir=None, 
-                 pan_channel=0, tilt_channel=1, enable_servos=True, i2c_address=0x40):
-        """
-        Initialize the soccer ball tracker with Adafruit servo control
+class BallTracker:
+    def __init__(self, model_path, target_class='sports ball', camera_device='/dev/video0'):
+        print("Initializing Ball Tracker...")
         
-        Args:
-            model_path (str): Path to your trained YOLO model
-            camera_index (int): Camera index (usually 0 for default camera)
-            output_dir (str): Directory to save videos (default: Desktop)
-            pan_channel (int): PCA9685 channel for pan servo (0-15)
-            tilt_channel (int): PCA9685 channel for tilt servo (0-15)
-            enable_servos (bool): Enable servo control
-            i2c_address (hex): I2C address of PCA9685 board
-        """
-        # Set output directory (Desktop by default)
-        if output_dir is None:
-            home_dir = os.path.expanduser("~")
-            self.output_dir = os.path.join(home_dir, "Desktop")
-        else:
-            self.output_dir = output_dir
-            
-        # Make sure output directory exists
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Load YOLO model
-        print(f"Loading YOLO model from: {model_path}")
+        # Initialize YOLO model
         self.model = YOLO(model_path)
+        self.target_class = target_class
         
-        # Initialize camera
-        print(f"Initializing camera {camera_index}")
-        self.cap = cv2.VideoCapture(camera_index)
+        # Initialize webcam with specific device
+        self.camera = None
+        self.camera_device = camera_device
+        
+        # Try to open the specific camera device
+        try:
+            print(f"Attempting to open camera at {camera_device}...")
+            
+            # First try with V4L2 backend (preferred for Linux)
+            self.camera = cv2.VideoCapture(0, cv2.CAP_V4L2)  # /dev/video0 maps to device 0
+            
+            if not self.camera.isOpened():
+                print("V4L2 backend failed, trying default backend...")
+                self.camera.release()
+                self.camera = cv2.VideoCapture(0)  # Try with default backend
+            
+            if not self.camera.isOpened():
+                raise RuntimeError(f"Cannot open camera device {camera_device}")
+            
+            # Test if we can actually read frames
+            ret, test_frame = self.camera.read()
+            if not ret or test_frame is None:
+                raise RuntimeError(f"Cannot read frames from {camera_device}")
+            
+            print(f"Successfully opened camera: {camera_device}")
+            
+        except Exception as e:
+            if self.camera:
+                self.camera.release()
+            raise RuntimeError(f"Failed to initialize camera {camera_device}: {e}")
         
         # Set camera properties
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.camera.set(cv2.CAP_PROP_FPS, 30)
         
-        # Check if camera opened successfully
-        if not self.cap.isOpened():
-            raise Exception("Error: Could not open camera")
-            
-        # Get actual camera properties
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = int(self.cap.get(cv2.CAP_PROP_FPS))
+        # Set additional properties for better performance
+        self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize latency
         
-        print(f"Camera initialized: {self.width}x{self.height} @ {self.fps}fps")
+        # Verify settings
+        actual_width = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
+        print(f"Camera settings: {actual_width}x{actual_height} @ {actual_fps} FPS")
         
-        # Initialize servo controller
-        self.servo_enabled = enable_servos
-        if self.servo_enabled:
-            self.servo_controller = ServoController(pan_channel, tilt_channel, i2c_address)
-            if not self.servo_controller.enabled:
-                print("Servo control disabled - continuing without servo tracking")
-                self.servo_enabled = False
-        else:
-            print("Servo control disabled by user")
-            self.servo_controller = None
+        # Initialize ServoKit
+        self.kit = ServoKit(channels=16)
+        self.pan_pos = 90.0
+        self.tilt_pos = 90.0
         
-        # Tracking variables
-        self.ball_positions = []  # Store last positions for trajectory
-        self.max_positions = 30   # Max positions to store
-        self.last_detection_time = 0
-        self.detection_timeout = 2.0  # seconds
+        # Center servos
+        self.kit.servo[0].angle = self.pan_pos
+        self.kit.servo[1].angle = self.tilt_pos
+        time.sleep(2)  # Give servos time to move
+        print("Servos centered - Pan: channel 0, Tilt: channel 1")
         
-        # Colors (BGR format) - only for display
-        self.bbox_color = (0, 255, 0)      # Green for bounding box
-        self.center_color = (0, 0, 255)    # Red for center point
-        self.trail_color = (255, 0, 0)     # Blue for trajectory trail
-        self.servo_color = (255, 255, 0)   # Cyan for servo info
+        # PID controllers (tuned for smooth tracking)
+        self.pan_pid = PIDController(kp=0.6, ki=0.02, kd=0.1)
+        self.tilt_pid = PIDController(kp=0.6, ki=0.02, kd=0.1)
         
-        # Video recording variables
-        self.video_writer = None
-        self.recording = False
-        self.output_filename = None
-        self.fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        # Frame parameters
+        self.frame_width = 640
+        self.frame_height = 480
+        self.frame_center_x = self.frame_width // 2
+        self.frame_center_y = self.frame_height // 2
         
-        # Tracking state
+        # Tracking parameters
         self.tracking_active = False
-        self.last_target_x = self.width // 2
-        self.last_target_y = self.height // 2
+        self.last_detection_time = 0
+        self.detection_timeout = 3.0
+        self.movement_threshold = 15  # Minimum pixel error to move servos
         
-    def start_recording(self):
-        """Start recording clean video (no bounding boxes)"""
-        if self.recording:
-            print("Already recording!")
-            return
-            
-        # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_filename = os.path.join(self.output_dir, f"soccer_tracking_{timestamp}.avi")
+        # Servo limits
+        self.pan_min, self.pan_max = 0, 180
+        self.tilt_min, self.tilt_max = 30, 150
         
-        # Initialize video writer
-        self.video_writer = cv2.VideoWriter(
-            self.output_filename,
-            self.fourcc,
-            self.fps,
-            (self.width, self.height)
-        )
+        print("Ball Tracker ready!")
         
-        if not self.video_writer.isOpened():
-            print("Error: Could not open video writer")
-            return
-            
-        self.recording = True
-        print(f"Started recording clean video: {self.output_filename}")
+    def detect_ball(self, frame):
+        """Detect ball using YOLO and return best detection"""
+        results = self.model(frame, conf=0.25, device='cpu', verbose=False)
         
-    def stop_recording(self):
-        """Stop recording video"""
-        if not self.recording:
-            print("Not currently recording!")
-            return
-            
-        self.recording = False
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
-            
-        print(f"Recording stopped. Clean video saved: {self.output_filename}")
+        best_detection = None
+        best_confidence = 0
         
-    def draw_trajectory(self, frame):
-        """Draw trajectory trail of the soccer ball (display only)"""
-        if len(self.ball_positions) > 1:
-            # Draw lines connecting previous positions
-            for i in range(1, len(self.ball_positions)):
-                cv2.line(frame, 
-                        self.ball_positions[i-1], 
-                        self.ball_positions[i], 
-                        self.trail_color, 2)
-    
-    def draw_servo_info(self, frame):
-        """Draw servo information on display frame"""
-        if not self.servo_enabled or not self.servo_controller:
-            cv2.putText(frame, "Servo: DISABLED", (10, 60), 
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            return
-            
-        # Draw servo positions
-        pan_pos = self.servo_controller.current_pan
-        tilt_pos = self.servo_controller.current_tilt
-        
-        cv2.putText(frame, f"Pan: {pan_pos:.1f}°", (10, 60), 
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.servo_color, 2)
-        cv2.putText(frame, f"Tilt: {tilt_pos:.1f}°", (10, 85), 
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.servo_color, 2)
-        
-        # Draw tracking status
-        status = "TRACKING" if self.tracking_active else "SEARCHING"
-        color = (0, 255, 0) if self.tracking_active else (0, 165, 255)
-        cv2.putText(frame, f"Status: {status}", (10, 110), 
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        # Draw center crosshairs
-        center_x, center_y = self.width // 2, self.height // 2
-        cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (255, 255, 255), 1)
-        cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (255, 255, 255), 1)
-        
-        # Draw dead zone
-        dead_zone = self.servo_controller.dead_zone if self.servo_controller else 20
-        cv2.rectangle(frame, 
-                     (center_x - dead_zone, center_y - dead_zone),
-                     (center_x + dead_zone, center_y + dead_zone),
-                     (128, 128, 128), 1)
-    
-    def process_frame_for_display(self, frame):
-        """
-        Process frame for display with tracking overlays and servo control
-        
-        Args:
-            frame: Input frame from camera
-            
-        Returns:
-            display_frame: Frame with tracking overlays for display
-        """
-        display_frame = frame.copy()
-        current_time = time.time()
-        ball_detected = False
-        
-        # Run YOLO inference
-        results = self.model(frame, conf=0.5, verbose=False)
-        
-        # Process detections
         for result in results:
-            boxes = result.boxes
-            if boxes is not None:
-                for box in boxes:
-                    # Get bounding box coordinates
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                    confidence = box.conf[0].cpu().numpy()
-                    class_id = int(box.cls[0].cpu().numpy())
+            if result.boxes is not None:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    class_name = self.model.names[class_id]
+                    confidence = float(box.conf[0])
                     
-                    # Calculate center point
-                    center_x = int((x1 + x2) / 2)
-                    center_y = int((y1 + y2) / 2)
-                    
-                    # Update tracking state
-                    ball_detected = True
-                    self.last_detection_time = current_time
-                    self.last_target_x = center_x
-                    self.last_target_y = center_y
-                    
-                    # Control servos to track the ball
-                    if self.servo_enabled and self.servo_controller:
-                        self.servo_controller.track_target(center_x, center_y, 
-                                                         self.width, self.height)
-                    
-                    # Add to trajectory
-                    self.ball_positions.append((center_x, center_y))
-                    if len(self.ball_positions) > self.max_positions:
-                        self.ball_positions.pop(0)
-                    
-                    # Draw bounding box on display frame only
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), self.bbox_color, 2)
-                    
-                    # Draw center point on display frame only
-                    cv2.circle(display_frame, (center_x, center_y), 5, self.center_color, -1)
-                    
-                    # Draw confidence and class label on display frame only
-                    label = f"Soccer Ball: {confidence:.2f}"
-                    label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                    cv2.rectangle(display_frame, (x1, y1 - label_size[1] - 10), 
-                                (x1 + label_size[0], y1), self.bbox_color, -1)
-                    cv2.putText(display_frame, label, (x1, y1 - 5), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                    
-                    # Display coordinates on display frame only
-                    coord_text = f"({center_x}, {center_y})"
-                    cv2.putText(display_frame, coord_text, (center_x + 10, center_y), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.center_color, 1)
+                    # Check if it's our target class and has good confidence
+                    if (self.target_class.lower() in class_name.lower() and 
+                        confidence > best_confidence and confidence > 0.3):
+                        
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        center_x = int((x1 + x2) / 2)
+                        center_y = int((y1 + y2) / 2)
+                        
+                        best_detection = {
+                            'center_x': center_x,
+                            'center_y': center_y,
+                            'confidence': confidence,
+                            'bbox': (int(x1), int(y1), int(x2), int(y2))
+                        }
+                        best_confidence = confidence
         
-        # Update tracking status
-        self.tracking_active = ball_detected or (current_time - self.last_detection_time < self.detection_timeout)
+        if best_detection:
+            return (best_detection['center_x'], best_detection['center_y'], 
+                   best_detection['confidence'], best_detection['bbox'])
         
-        # If no ball detected for too long, maybe center the servos or do a search pattern
-        if not self.tracking_active and self.servo_enabled and self.servo_controller:
-            # Could implement a search pattern here
-            pass
-        
-        # Draw trajectory trail on display frame only
-        self.draw_trajectory(display_frame)
-        
-        # Draw servo information
-        self.draw_servo_info(display_frame)
-        
-        return display_frame
+        return None, None, None, None
     
-    def run(self):
-        """Main tracking and recording loop"""
-        print("Starting soccer ball tracking with servo control...")
-        print("Controls:")
-        print("  SPACE - Start/Stop recording")
-        print("  'q' - Quit")
-        print("  'r' - Reset trajectory")
-        print("  's' - Save screenshot")
-        print("  'c' - Center servos")
-        print("  't' - Toggle servo tracking")
-        
-        # FPS calculation variables
-        fps_counter = 0
-        start_time = time.time()
+    def move_servos(self, pan_angle, tilt_angle):
+        """Move servos with safety limits"""
+        # Apply limits
+        pan_angle = max(self.pan_min, min(self.pan_max, pan_angle))
+        tilt_angle = max(self.tilt_min, min(self.tilt_max, tilt_angle))
         
         try:
-            while True:
-                # Read frame from camera
-                ret, frame = self.cap.read()
+            self.kit.servo[0].angle = pan_angle
+            self.kit.servo[1].angle = tilt_angle
+            self.pan_pos = pan_angle
+            self.tilt_pos = tilt_angle
+        except Exception as e:
+            print(f"Servo error: {e}")
+    
+    def search_pattern(self):
+        """Simple search pattern when ball is lost"""
+        current_time = time.time()
+        # Slow sweep pattern
+        sweep_angle = 25 * np.sin(current_time * 0.5)  # 25 degree sweep
+        search_pan = 90 + sweep_angle
+        self.move_servos(search_pan, self.tilt_pos)
+    
+    def track_ball(self):
+        """Main tracking loop"""
+        print("\n=== BALL TRACKING STARTED ===")
+        print(f"Camera device: {self.camera_device}")
+        print("Controls:")
+        print("  'q' - Quit")
+        print("  'c' - Center servos")
+        print("  's' - Toggle search mode")
+        print("  'r' - Reset camera connection")
+        print("================================")
+        
+        self.tracking_active = True
+        search_mode = False
+        frame_count = 0
+        
+        try:
+            while self.tracking_active:
+                # Capture frame from webcam
+                ret, frame_bgr = self.camera.read()
                 if not ret:
-                    print("Error: Could not read frame")
-                    break
+                    print("Failed to capture frame from webcam")
+                    # Try to reconnect camera
+                    print("Attempting to reconnect camera...")
+                    self.camera.release()
+                    time.sleep(1)
+                    self.camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+                    if not self.camera.isOpened():
+                        self.camera = cv2.VideoCapture(0)
+                    continue
                 
-                # Record CLEAN frame (original, no overlays) if recording
-                if self.recording and self.video_writer:
-                    self.video_writer.write(frame)  # Write original clean frame
-                
-                # Process frame for display with tracking overlays
-                display_frame = self.process_frame_for_display(frame)
-                
-                # Calculate and display FPS on display frame only
-                fps_counter += 1
-                elapsed_time = time.time() - start_time
-                if elapsed_time >= 1.0:
-                    fps = fps_counter / elapsed_time
-                    fps_counter = 0
-                    start_time = time.time()
+                # Run detection every few frames for better performance
+                if frame_count % 1 == 0:
+                    ball_x, ball_y, confidence, bbox = self.detect_ball(frame_bgr)
                     
-                    # Display FPS on display frame only
-                    cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 30), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    if ball_x is not None:
+                        self.last_detection_time = time.time()
+                        search_mode = False
+                        
+                        # Calculate tracking errors
+                        pan_error = self.frame_center_x - ball_x
+                        tilt_error = ball_y - self.frame_center_y  # Inverted for camera
+                        
+                        # Only move if error is significant (reduces jitter)
+                        if abs(pan_error) > self.movement_threshold or abs(tilt_error) > self.movement_threshold:
+                            # Get PID outputs
+                            pan_output = self.pan_pid.update(pan_error)
+                            tilt_output = self.tilt_pid.update(tilt_error)
+                            
+                            # Move servos
+                            new_pan = self.pan_pos - pan_output
+                            new_tilt = self.tilt_pos + tilt_output
+                            self.move_servos(new_pan, new_tilt)
+                        
+                        # Draw tracking visualization
+                        cv2.circle(frame_bgr, (ball_x, ball_y), 12, (0, 255, 0), 3)
+                        cv2.rectangle(frame_bgr, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+                        cv2.putText(frame_bgr, f'TRACKING: {confidence:.2f}', 
+                                   (bbox[0], bbox[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        
+                        # Draw line from center to ball
+                        cv2.line(frame_bgr, (self.frame_center_x, self.frame_center_y), 
+                                (ball_x, ball_y), (0, 255, 255), 2)
+                        
+                        print(f"Tracking: Ball at ({ball_x:3d}, {ball_y:3d}) | "
+                              f"Pan: {self.pan_pos:5.1f}° | Tilt: {self.tilt_pos:5.1f}° | "
+                              f"Conf: {confidence:.2f}")
+                    
+                    else:
+                        # No ball detected
+                        time_since_detection = time.time() - self.last_detection_time
+                        
+                        if time_since_detection > self.detection_timeout:
+                            if not search_mode:
+                                print("Ball lost - Starting search pattern")
+                                search_mode = True
+                            self.search_pattern()
                 
-                # Add recording indicator to display frame only
-                if self.recording:
-                    cv2.circle(display_frame, (self.width - 30, 30), 10, (0, 0, 255), -1)  # Red dot
-                    cv2.putText(display_frame, "REC", (self.width - 60, 35), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:
-                    cv2.putText(display_frame, "Press SPACE to record", (self.width - 200, 35), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                # Draw UI elements
+                # Crosshairs at center
+                cv2.line(frame_bgr, (self.frame_center_x-25, self.frame_center_y), 
+                        (self.frame_center_x+25, self.frame_center_y), (255, 0, 0), 2)
+                cv2.line(frame_bgr, (self.frame_center_x, self.frame_center_y-25), 
+                        (self.frame_center_x, self.frame_center_y+25), (255, 0, 0), 2)
                 
-                # Display frame info on display frame only
-                cv2.putText(display_frame, f"Resolution: {self.width}x{self.height}", 
-                          (10, self.height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                # Status display
+                status_color = (0, 255, 0) if ball_x is not None else ((0, 255, 255) if search_mode else (0, 0, 255))
+                status_text = "TRACKING" if ball_x is not None else ("SEARCHING" if search_mode else "NO DETECTION")
                 
-                # Show the display frame (with overlays)
-                cv2.imshow('Soccer Ball Tracker with Servos', display_frame)
+                cv2.putText(frame_bgr, f'Status: {status_text}', 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+                cv2.putText(frame_bgr, f'Pan: {self.pan_pos:5.1f}°  Tilt: {self.tilt_pos:5.1f}°', 
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(frame_bgr, f'Target: {self.target_class}', 
+                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                cv2.putText(frame_bgr, f'Device: {self.camera_device}', 
+                           (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 
-                # Handle key presses
+                # Display frame
+                cv2.imshow('Ball Tracker - Press Q to quit', frame_bgr)
+                
+                # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
+                    print("Quitting...")
                     break
-                elif key == ord(' '):  # Spacebar - start/stop recording
-                    if self.recording:
-                        self.stop_recording()
-                    else:
-                        self.start_recording()
-                elif key == ord('r'):
-                    # Reset trajectory
-                    self.ball_positions = []
-                    print("Trajectory reset")
-                elif key == ord('s'):
-                    # Save clean screenshot (no overlays)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    screenshot_filename = os.path.join(self.output_dir, f"clean_screenshot_{timestamp}.jpg")
-                    cv2.imwrite(screenshot_filename, frame)  # Save original clean frame
-                    print(f"Clean screenshot saved: {screenshot_filename}")
                 elif key == ord('c'):
-                    # Center servos
-                    if self.servo_enabled and self.servo_controller:
-                        self.servo_controller.center_servos()
-                        print("Servos centered")
-                elif key == ord('t'):
-                    # Toggle servo tracking
-                    self.servo_enabled = not self.servo_enabled
-                    status = "enabled" if self.servo_enabled else "disabled"
-                    print(f"Servo tracking {status}")
-                    
+                    print("Centering servos...")
+                    self.move_servos(90, 90)
+                    search_mode = False
+                elif key == ord('s'):
+                    search_mode = not search_mode
+                    print(f"Search mode: {'ON' if search_mode else 'OFF'}")
+                elif key == ord('r'):
+                    print("Resetting camera connection...")
+                    self.camera.release()
+                    time.sleep(1)
+                    self.camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+                    if not self.camera.isOpened():
+                        self.camera = cv2.VideoCapture(0)
+                
+                frame_count += 1
+                time.sleep(0.03)  # ~30 FPS
+                
         except KeyboardInterrupt:
             print("\nInterrupted by user")
         
+        finally:
+            self.cleanup()
+    
     def cleanup(self):
         """Clean up resources"""
-        if self.recording:
-            self.stop_recording()
-            
-        if self.servo_controller:
-            self.servo_controller.cleanup()
-            
-        if self.cap:
-            self.cap.release()
+        print("Cleaning up...")
+        self.tracking_active = False
+        
+        # Center servos before exit
+        try:
+            print("Centering servos...")
+            self.kit.servo[0].angle = 90
+            self.kit.servo[1].angle = 90
+            time.sleep(1)
+        except Exception as e:
+            print(f"Error centering servos: {e}")
+        
+        # Release camera and close windows
+        if self.camera:
+            self.camera.release()
         cv2.destroyAllWindows()
-        print("Cleanup completed")
+        print("Cleanup complete!")
 
 def main():
     # Configuration
-    MODEL_PATH = "runs/detect/train3/weights/best.pt"  # Update this path to your model
-    CAMERA_INDEX = 0  # Usually 0 for default camera, try 1, 2 if needed
-    OUTPUT_DIR = None  # None = Desktop, or specify custom path
+    MODEL_PATH = "/home/thiago/runs/detect/train3/weights/best.pt"
+    TARGET_CLASS = "sports ball"  # Change this to match your YOLO model's class name
+    CAMERA_DEVICE = "/dev/video0"  # Specific camera device
     
-    # Adafruit PCA9685 servo configuration
-    PAN_SERVO_CHANNEL = 0    # PCA9685 channel for pan servo (0-15)
-    TILT_SERVO_CHANNEL = 1   # PCA9685 channel for tilt servo (0-15)
-    I2C_ADDRESS = 0x40       # I2C address of PCA9685 board (default 0x40)
-    ENABLE_SERVOS = True     # Set to False to disable servo control
+    print("=== YOLO Ball Tracker with Servo Control ===")
+    print(f"Model: {MODEL_PATH}")
+    print(f"Target: {TARGET_CLASS}")
+    print(f"Camera: {CAMERA_DEVICE}")
+    print("Hardware: Adafruit ServoKit (16-channel)")
+    print("Pan Servo: Channel 0, Tilt Servo: Channel 1")
+    print("=" * 45)
     
     try:
-        # Create and run tracker with Adafruit servo control
-        tracker = SoccerBallTrackerWithServos(
-            MODEL_PATH, 
-            CAMERA_INDEX, 
-            OUTPUT_DIR,
-            PAN_SERVO_CHANNEL,
-            TILT_SERVO_CHANNEL,
-            ENABLE_SERVOS,
-            I2C_ADDRESS
-        )
-        tracker.run()
+        # Create and run tracker
+        tracker = BallTracker(MODEL_PATH, TARGET_CLASS, CAMERA_DEVICE)
+        tracker.track_ball()
         
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
+    except FileNotFoundError:
+        print(f"Error: Model file not found at {MODEL_PATH}")
+        print("Please check the path to your YOLO model.")
     except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        # Clean up
-        if 'tracker' in locals():
-            tracker.cleanup()
+        print(f"Error initializing tracker: {e}")
+        print("Make sure your camera and servo hardware are connected properly.")
+        print("\nTroubleshooting tips:")
+        print("- Check if camera is available: ls /dev/video*")
+        print("- Test camera: v4l2-ctl --device=/dev/video0 --info")
+        print("- Check camera permissions: sudo usermod -a -G video $USER")
 
 if __name__ == "__main__":
     main()
