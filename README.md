@@ -6,7 +6,7 @@ A Pi 5-based object detection system that **tracks a soccer ball using AI in rea
 
 ##  ⚽ Overview
 
-This project captures video and automatically follows the **soccer ball or whatever yo want to track** during games or training sessions. The system identifies the soccer ball using object detection and moves the camera using servo motors to keep it in frame. Recordings are saved for later analysis.
+This project captures video and automatically follows the **soccer ball or whatever you want to track** during games or training sessions. The system identifies the soccer ball using object detection and moves the camera using servo motors to keep it in frame. Recordings are saved for later analysis.
 
 ---
 
